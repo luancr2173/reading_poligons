@@ -1,179 +1,107 @@
-/* global google */
-import { useEffect, useState, useRef } from "react";
-// Se precisar converter ESRI -> GeoJSON
-import * as Terraformer from "terraformer";
-import "terraformer-arcgis-parser";
+import React, { useEffect, useState } from "react";
+import {
+  GoogleMap,
+  Polygon,
+  DrawingManager,
+  useLoadScript,
+} from "@react-google-maps/api";
 
-// Cache global do GeoJSON
-let geoJsonCache = null;
+// Configuração do mapa
+const mapContainerStyle = { width: "100vw", height: "100vh" };
+const center = { lat: -15.793889, lng: -47.882778 };
+const zoom = 15;
 
-// Debounce ninja
-const debounce = (fn, delay = 100) => {
-  let timer;
-  return (...args) => {
-    clearTimeout(timer);
-    timer = setTimeout(() => fn(...args), delay);
-  };
-};
+// Função turbo pra converter GeoJSON em paths do Google Maps
+const geoJsonToPaths = (geojson) =>
+  geojson.features.map((feature) =>
+    feature.geometry.coordinates[0].map((coord) => ({
+      lat: coord[1],
+      lng: coord[0],
+    }))
+  );
 
-export default function MapComponent({ center, zoom }) {
-  const mapRef = useRef(null);
-  const [map, setMap] = useState(null);
+export default function MapComponent() {
+  const { isLoaded } = useLoadScript({
+    googleMapsApiKey: "", // <--- coloca sua chave
+    libraries: ["drawing"], // necessário pro DrawingManager
+  });
 
-  // 1️⃣ Inicializa o mapa com lazy-load da API
+  const [paths, setPaths] = useState([]);
+  const [userPolygons, setUserPolygons] = useState([]);
+
+  // Fetch GeoJSON turbo
   useEffect(() => {
-    if (window.google && window.google.maps) return initializeMap();
-
-    const script = document.createElement("script");
-    script.src = `https://maps.googleapis.com/maps/api/js?key=`;
-    script.async = true;
-    script.defer = true;
-    script.onload = initializeMap;
-    document.head.appendChild(script);
-
-    function initializeMap() {
-      if (!mapRef.current || !window.google) return;
-
-      const newMap = new window.google.maps.Map(mapRef.current, {
-        center,
-        zoom,
-        mapId: null, // Map ID opcional
-      });
-      setMap(newMap);
-    }
+    const fetchGeoJson = async () => {
+      try {
+        const res = await fetch("URL_DA_SUA_API_GEOJSON"); // <--- coloca sua URL real
+        const data = await res.json();
+        const convertedPaths = geoJsonToPaths(data);
+        setPaths(convertedPaths);
+      } catch (err) {
+        console.error("Erro ao buscar GeoJSON:", err);
+      }
+    };
+    fetchGeoJson();
   }, []);
 
-  // 2️⃣ Carrega polígonos com cache + conversão ESRI -> GeoJSON
-  useEffect(() => {
-    if (!map) return;
-    let isMounted = true;
-    const listeners = [];
+  if (!isLoaded) return <div>Carregando mapa...</div>;
 
-    const loadGeoJSON = async () => {
-      try {
-        let geoJson;
-        if (geoJsonCache) {
-          geoJson = geoJsonCache;
-        } else {
-          const wfsUrl =
-            "https://www.geoservicos.ide.df.gov.br/arcgis/rest/services/Aplicacoes/ENDERECAMENTO_ATIVIDADES_LUOS_PPCUB/FeatureServer/0/query?where=pu_end_usual LIKE '%QNG 4 LT 37%'&geometryType=esriGeometryEnvelope&spatialRel=esriSpatialRelIntersects&units=esriSRUnit_Foot&returnGeometry=true&returnDistinctValues=false&returnIdsOnly=false&returnCountOnly=false&returnExtentOnly=false&returnZ=false&returnM=false&multipatchOption=xyFootprint&returnTrueCurves=false&returnExceededLimitFeatures=false&returnCentroid=false&sqlFormat=none&featureEncoding=esriDefault&f=json&outFields=*";
-          const res = await fetch(wfsUrl);
-          if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-          const esriData = await res.json();
-          geoJson = Terraformer.ArcGIS.parse(esriData); // converte pro formato GeoJSON
-          geoJsonCache = geoJson;
-        }
+  return (
+    <GoogleMap mapContainerStyle={mapContainerStyle} zoom={zoom} center={center}>
+      {/* Polígonos do GeoJSON */}
+      {paths.map((path, i) => (
+        <Polygon
+          key={`geojson-${i}`}
+          paths={path}
+          options={{
+            fillColor: "#FF0000",
+            fillOpacity: 0.4,
+            strokeColor: "#FF0000",
+            strokeOpacity: 1,
+            strokeWeight: 2,
+          }}
+        />
+      ))}
 
-        if (!isMounted || !map.data) return;
+      {/* Polígonos desenhados pelo usuário */}
+      {userPolygons.map((path, i) => (
+        <Polygon
+          key={`user-${i}`}
+          paths={path}
+          options={{
+            fillColor: "#0000FF",
+            fillOpacity: 0.3,
+            strokeColor: "#0000FF",
+            strokeOpacity: 1,
+            strokeWeight: 2,
+          }}
+        />
+      ))}
 
-        // Limpa dados antigos e adiciona novos
-        map.data.forEach((f) => map.data.remove(f));
-        map.data.addGeoJson(geoJson);
-
-        // Estilo padrão
-        map.data.setStyle({
-          fillColor: "#007BFF",
-          strokeWeight: 1,
-          strokeColor: "#FFFFFF",
-          fillOpacity: 0.35,
-        });
-
-        // InfoWindow
-        const infoWindow = new window.google.maps.InfoWindow();
-
-        const handleMouseOver = debounce((event) => {
-          map.data.revertStyle();
-          map.data.overrideStyle(event.feature, {
-            strokeWeight: 3,
-            strokeColor: "#FFFF00",
-          });
-        });
-
-        const handleMouseOut = debounce(() => map.data.revertStyle());
-
-        const handleClick = (event) => {
-          let content = '<div style="font-family:Arial,sans-serif;font-size:14px;max-height:150px;overflow-y:auto">';
-          event.feature.forEachProperty((value, property) => {
-            content += `<strong>${property}:</strong> ${value}<br>`;
-          });
-          content += "</div>";
-          infoWindow.setContent(content);
-          infoWindow.setPosition(event.latLng);
-          infoWindow.setOptions({ pixelOffset: new window.google.maps.Size(0, -10) });
-          infoWindow.open(map);
-        };
-
-        listeners.push(map.data.addListener("mouseover", handleMouseOver));
-        listeners.push(map.data.addListener("mouseout", handleMouseOut));
-        listeners.push(map.data.addListener("click", handleClick));
-      } catch (err) {
-        console.error("Erro carregando GeoJSON:", err);
-      }
-    };
-
-    loadGeoJSON();
-
-    return () => {
-      isMounted = false;
-      if (map && map.data) {
-        window.google.maps.event.clearInstanceListeners(map.data);
-        map.data.forEach((f) => map.data.remove(f));
-      }
-    };
-  }, [map]);
-
-  // 3️⃣ Inicializa DrawingManager
-  useEffect(() => {
-    if (!map || !window.google.maps.drawing) return;
-
-    const drawingManager = new window.google.maps.drawing.DrawingManager({
-      drawingMode: null,
-      drawingControl: true,
-      drawingControlOptions: {
-        position: window.google.maps.ControlPosition.TOP_CENTER,
-        drawingModes: [window.google.maps.drawing.OverlayType.POLYGON],
-      },
-      polygonOptions: {
-        fillColor: "#FFC107",
-        fillOpacity: 0.5,
-        strokeWeight: 2,
-        strokeColor: "#FFC107",
-        editable: true,
-        zIndex: 1,
-      },
-    });
-
-    drawingManager.setMap(map);
-
-    const handlePolygonComplete = (polygon) => {
-      const path = polygon.getPath();
-      const coords = path.getArray().map((latLng) => ({ lat: latLng.lat(), lng: latLng.lng() }));
-      console.log("Polígono desenhado:", coords);
-
-      // Monitorar edição do polígono
-      const updateCoords = () => {
-        const newCoords = path.getArray().map((latLng) => ({ lat: latLng.lat(), lng: latLng.lng() }));
-        console.log("Polígono editado:", newCoords);
-      };
-
-      path.addListener("set_at", updateCoords);
-      path.addListener("insert_at", updateCoords);
-      path.addListener("remove_at", updateCoords);
-
-      drawingManager.setDrawingMode(null); // sai do modo desenho
-    };
-
-    const polygonCompleteListener = window.google.maps.event.addListener(
-      drawingManager,
-      "polygoncomplete",
-      handlePolygonComplete
-    );
-
-    return () => {
-      window.google.maps.event.removeListener(polygonCompleteListener);
-      drawingManager.setMap(null);
-    };
-  }, [map]);
-
-  return <div ref={mapRef} style={{ width: "100%", height: "100%" }} />;
+      {/* DrawingManager turbo */}
+      <DrawingManager
+        options={{
+          drawingControl: true,
+          drawingControlOptions: {
+            position: window.google.maps.ControlPosition.TOP_CENTER,
+            drawingModes: ["polygon"],
+          },
+          polygonOptions: {
+            fillColor: "#0000FF",
+            fillOpacity: 0.3,
+            strokeColor: "#0000FF",
+            strokeWeight: 2,
+          },
+        }}
+        onPolygonComplete={(polygon) => {
+          const path = polygon.getPath().getArray().map((latLng) => ({
+            lat: latLng.lat(),
+            lng: latLng.lng(),
+          }));
+          setUserPolygons((prev) => [...prev, path]);
+          polygon.setMap(null); // opcional: remove o polígono nativo pra usar nosso state
+        }}
+      />
+    </GoogleMap>
+  );
 }
